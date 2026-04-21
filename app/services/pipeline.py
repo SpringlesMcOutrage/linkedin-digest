@@ -22,7 +22,7 @@ def run_daily_pipeline(
     profiles = [p.strip() for p in profiles_raw.split(",") if p.strip()]
 
     scraper = LinkedInScraper(
-        rapidapi_key=cfg.get("RAPIDAPI_KEY", ""),
+        apify_token=cfg.get("APIFY_TOKEN", ""),
         profiles=profiles,
     )
     posts = scraper.fetch_feed_posts(max_posts=max_posts)

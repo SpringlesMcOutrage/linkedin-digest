@@ -29,3 +29,5 @@ class Config:
     # Pipeline
     MAX_POSTS_PER_RUN = int(os.environ.get("MAX_POSTS_PER_RUN", "50"))
     DIGEST_LANGUAGE = os.environ.get("DIGEST_LANGUAGE", "Ukrainian")
+
+    APIFY_TOKEN = os.environ.get("APIFY_TOKEN", "")
