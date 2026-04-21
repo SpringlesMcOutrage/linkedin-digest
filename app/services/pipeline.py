@@ -13,22 +13,17 @@ def run_daily_pipeline(
     nvidia_api_key_override: str = None,
     max_posts: int = 50,
 ) -> dict:
-    """
-    Full daily pipeline:
-    1. Scrape LinkedIn feed posts from followed people
-    2. Push basic contact/activity data to Salesforce
-    3. Send all posts to DeepSeek for AI digest generation
-    4. Return structured digest
-    """
     cfg = current_app.config
     today = date.today().isoformat()
     logger.info("Pipeline started for %s", today)
 
-    # ── 1. Scrape LinkedIn ────────────────────────────────────────────────────
+    # ── 1. Scrape LinkedIn via RapidAPI ───────────────────────────────────────
+    profiles_raw = cfg.get("LINKEDIN_PROFILES", "")
+    profiles = [p.strip() for p in profiles_raw.split(",") if p.strip()]
+
     scraper = LinkedInScraper(
-        email=cfg["LINKEDIN_EMAIL"],
-        password=cfg["LINKEDIN_PASSWORD"],
-        cookies_file=cfg["LINKEDIN_COOKIES_FILE"],
+        rapidapi_key=cfg.get("RAPIDAPI_KEY", ""),
+        profiles=profiles,
     )
     posts = scraper.fetch_feed_posts(max_posts=max_posts)
     logger.info("Scraped %d posts", len(posts))
@@ -38,12 +33,12 @@ def run_daily_pipeline(
 
     # ── 2. Salesforce sync ────────────────────────────────────────────────────
     sf = SalesforceService(
-        instance_url=cfg["SF_INSTANCE_URL"],
-        client_id=cfg["SF_CLIENT_ID"],
-        client_secret=cfg["SF_CLIENT_SECRET"],
-        username=cfg["SF_USERNAME"],
-        password=cfg["SF_PASSWORD"],
-        security_token=cfg["SF_SECURITY_TOKEN"],
+        instance_url=cfg.get("SF_INSTANCE_URL", ""),
+        client_id=cfg.get("SF_CLIENT_ID", ""),
+        client_secret=cfg.get("SF_CLIENT_SECRET", ""),
+        username=cfg.get("SF_USERNAME", ""),
+        password=cfg.get("SF_PASSWORD", ""),
+        security_token=cfg.get("SF_SECURITY_TOKEN", ""),
         access_token_override=sf_access_token,
     )
     sf_results = sf.sync_posts(posts, run_date=today)
@@ -51,13 +46,13 @@ def run_daily_pipeline(
 
     # ── 3. DeepSeek AI digest ─────────────────────────────────────────────────
     ai = DeepSeekService(
-        api_key=nvidia_api_key_override or cfg["NVIDIA_API_KEY"],
-        base_url=cfg["NVIDIA_BASE_URL"],
-        model=cfg["DEEPSEEK_MODEL"],
-        language=cfg["DIGEST_LANGUAGE"],
+        api_key=nvidia_api_key_override or cfg.get("NVIDIA_API_KEY", ""),
+        base_url=cfg.get("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+        model=cfg.get("DEEPSEEK_MODEL", "deepseek-ai/deepseek-v3"),
+        language=cfg.get("DIGEST_LANGUAGE", "Ukrainian"),
     )
     digest = ai.generate_digest(posts, run_date=today)
-    logger.info("Digest generated (%d chars)", len(digest.get("full_text", "")))
+    logger.info("Digest generated")
 
     return {
         "date": today,

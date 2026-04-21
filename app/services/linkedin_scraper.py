@@ -1,21 +1,17 @@
 """
-LinkedIn Feed Scraper using linkedin-api (mobile API).
-No browser needed — works from any IP including AWS.
+LinkedIn scraper using LI Data Scraper API via RapidAPI.
+Fetches recent posts from a list of LinkedIn profiles.
 """
 
 import logging
+import requests
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-try:
-    from linkedin_api import Linkedin
-    LINKEDIN_API_AVAILABLE = True
-except ImportError:
-    LINKEDIN_API_AVAILABLE = False
-    logger.warning("linkedin-api not installed")
+RAPIDAPI_HOST = "li-data-scraper.p.rapidapi.com"
 
 
 @dataclass
@@ -36,100 +32,127 @@ class LinkedInPost:
 
 
 class LinkedInScraper:
-    def __init__(self, email: str, password: str, cookies_file: str = None):
-        self.email = email
-        self.password = password
-        self._api = None
-
-    def _get_api(self):
-        if self._api is None:
-            if not LINKEDIN_API_AVAILABLE:
-                raise RuntimeError("linkedin-api not installed")
-            logger.info("Authenticating with LinkedIn API...")
-            self._api = Linkedin(self.email, self.password)
-            logger.info("LinkedIn API authenticated successfully")
-        return self._api
+    def __init__(self, rapidapi_key: str, profiles: list[str], **kwargs):
+        self.rapidapi_key = rapidapi_key
+        self.profiles = [p.strip() for p in profiles if p.strip()]
+        self.headers = {
+            "x-rapidapi-host": RAPIDAPI_HOST,
+            "x-rapidapi-key": rapidapi_key,
+            "Content-Type": "application/json",
+        }
 
     def fetch_feed_posts(self, max_posts: int = 50) -> list[dict]:
-        if not LINKEDIN_API_AVAILABLE:
-            logger.warning("linkedin-api not available — returning empty list")
+        if not self.profiles:
+            logger.warning("No LinkedIn profiles configured in LINKEDIN_PROFILES")
             return []
 
-        try:
-            api = self._get_api()
-            posts = []
-            seen_urls = set()
+        all_posts = []
+        posts_per_profile = max(1, max_posts // len(self.profiles))
 
-            logger.info("Fetching LinkedIn feed posts (max: %d)", max_posts)
-
-            feed = api.get_feed_posts(limit=max_posts)
-
-            for item in feed:
-                if len(posts) >= max_posts:
-                    break
-                try:
-                    post = self._parse_feed_item(item)
-                    if post and post.post_url not in seen_urls:
-                        seen_urls.add(post.post_url)
-                        posts.append(post.to_dict())
-                except Exception as exc:
-                    logger.debug("Failed to parse feed item: %s", exc)
-                    continue
-
-            logger.info("Collected %d posts from LinkedIn feed", len(posts))
-            return posts
-
-        except Exception as exc:
-            logger.error("LinkedIn API error: %s", exc)
-            return []
-
-    def _parse_feed_item(self, item: dict) -> Optional[LinkedInPost]:
-        actor = item.get("actor", {})
-        author_name = actor.get("name", {}).get("text", "Unknown")
-        description = actor.get("description", {})
-        author_headline = description.get("text", "") if description else ""
-        author_company = _extract_company(author_headline)
-
-        actor_urn = actor.get("urn", "")
-        profile_id = ""
-        for prefix in ("urn:li:member:", "urn:li:person:"):
-            if prefix in actor_urn:
-                profile_id = actor_urn.split(prefix)[-1]
+        for profile_url in self.profiles:
+            if len(all_posts) >= max_posts:
                 break
-        author_profile_url = f"https://www.linkedin.com/in/{profile_id}" if profile_id else ""
+            try:
+                posts = self._fetch_profile_posts(profile_url, limit=posts_per_profile)
+                all_posts.extend(posts)
+                logger.info("Fetched %d posts from %s", len(posts), profile_url)
+            except Exception as exc:
+                logger.error("Failed to fetch posts from %s: %s", profile_url, exc)
 
-        commentary = item.get("commentary", {})
-        post_text = ""
-        if commentary:
-            text_obj = commentary.get("text", {})
-            post_text = text_obj.get("text", "") if isinstance(text_obj, dict) else str(text_obj)
+        logger.info("Total posts collected: %d", len(all_posts))
+        return [p.to_dict() for p in all_posts[:max_posts]]
 
+    def _fetch_profile_posts(self, profile_url: str, limit: int = 10) -> list[LinkedInPost]:
+        url = f"https://{RAPIDAPI_HOST}/get-profile-post-and-comments"
+        params = {
+            "url": profile_url,
+            "page": "1",
+        }
+
+        resp = requests.get(url, headers=self.headers, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+
+        posts = []
+        items = data if isinstance(data, list) else data.get("data", data.get("posts", []))
+
+        for item in items[:limit]:
+            try:
+                post = self._parse_item(item, profile_url)
+                if post:
+                    posts.append(post)
+            except Exception as exc:
+                logger.debug("Failed to parse post item: %s", exc)
+
+        return posts
+
+    def _parse_item(self, item: dict, profile_url: str) -> Optional[LinkedInPost]:
+        # Post text
+        post_text = (
+            item.get("text") or
+            item.get("commentary") or
+            item.get("description") or
+            ""
+        )
         if not post_text:
             return None
 
-        entity_urn = item.get("entityUrn", "")
-        post_url = f"https://www.linkedin.com/feed/update/{entity_urn}" if entity_urn else ""
+        # Author info
+        author = item.get("author", item.get("actor", {}))
+        if isinstance(author, dict):
+            author_name = author.get("name") or author.get("fullName") or "Unknown"
+            author_headline = author.get("headline") or author.get("occupation") or ""
+            author_profile_url = author.get("url") or author.get("profileUrl") or profile_url
+        else:
+            author_name = "Unknown"
+            author_headline = ""
+            author_profile_url = profile_url
 
-        social = item.get("socialDetail", {})
-        reactions_count = 0
-        comments_count = 0
-        if social:
-            reactions_count = social.get("reactionSummary", {}).get("count", 0) or 0
-            comments_count = (social.get("comments", {}).get("paging", {}) or {}).get("total", 0)
+        author_company = _extract_company(author_headline)
 
-        sub_desc = actor.get("subDescription", {})
-        timestamp_raw = sub_desc.get("text", "") if sub_desc else ""
+        # Post URL
+        post_url = (
+            item.get("url") or
+            item.get("postUrl") or
+            item.get("shareUrl") or
+            ""
+        )
+
+        # Engagement
+        reactions_count = (
+            item.get("totalReactionCount") or
+            item.get("reactions") or
+            item.get("likesCount") or
+            0
+        )
+        comments_count = (
+            item.get("commentsCount") or
+            item.get("comments") or
+            0
+        )
+        if isinstance(reactions_count, dict):
+            reactions_count = reactions_count.get("count", 0)
+        if isinstance(comments_count, dict):
+            comments_count = comments_count.get("count", 0)
+
+        # Timestamp
+        timestamp_raw = (
+            item.get("postedAt") or
+            item.get("publishedAt") or
+            item.get("createdAt") or
+            ""
+        )
 
         return LinkedInPost(
-            author_name=author_name,
-            author_headline=author_headline,
-            author_profile_url=author_profile_url,
-            author_company=author_company,
-            post_text=post_text[:2000],
-            post_url=post_url,
-            reactions_count=reactions_count,
-            comments_count=comments_count,
-            timestamp_raw=timestamp_raw,
+            author_name=str(author_name),
+            author_headline=str(author_headline),
+            author_profile_url=str(author_profile_url),
+            author_company=str(author_company),
+            post_text=str(post_text)[:2000],
+            post_url=str(post_url),
+            reactions_count=int(reactions_count) if reactions_count else 0,
+            comments_count=int(comments_count) if comments_count else 0,
+            timestamp_raw=str(timestamp_raw),
         )
 
 
